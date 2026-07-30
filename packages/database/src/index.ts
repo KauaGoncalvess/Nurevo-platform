@@ -1,6 +1,8 @@
 export { createAppClient, createAdminClient } from "./clients";
 export {
   forTenant,
+  forUser,
+  forInvitationToken,
   withTenant,
   tenantStorage,
   getTenantContext,

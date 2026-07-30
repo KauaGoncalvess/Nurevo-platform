@@ -1,10 +1,12 @@
 import { Controller, Get, UseGuards } from "@nestjs/common";
+import { RequiresPermission } from "../../../core/rbac/rbac.decorators";
 import { TenantGuard } from "../../../core/tenant/tenant.guard";
 import { BranchesService } from "../application/branches.service";
 import type { BranchSummary } from "../application/branches.service";
 
 @Controller("branches")
 @UseGuards(TenantGuard)
+@RequiresPermission("branches:read")
 export class BranchesController {
   constructor(private readonly branches: BranchesService) {}
 

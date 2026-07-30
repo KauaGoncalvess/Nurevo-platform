@@ -2,13 +2,11 @@ import "reflect-metadata";
 import { Logger } from "@nestjs/common";
 import { NestFactory } from "@nestjs/core";
 import { AppModule } from "./app.module";
-import { assertDevFallbackDisabled } from "./core/tenant/tenant.middleware";
 
 async function bootstrap(): Promise<void> {
-  // Antes de abrir a porta: se a configuração permitir trocar de tenant por
-  // header em produção, o processo não sobe.
-  assertDevFallbackDisabled();
-
+  // As checagens de configuração que derrubam o boot ficam nos módulos que as
+  // entendem: JWT_SECRET em core/auth, provedor de e-mail em modules/identity.
+  // Falhar ao subir é melhor que subir inseguro e descobrir em produção.
   const app = await NestFactory.create(AppModule);
   const port = Number(process.env.PORT ?? 3333);
 

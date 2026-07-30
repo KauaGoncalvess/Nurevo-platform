@@ -44,6 +44,10 @@ pnpm install
 docker compose up -d
 cp .env.example .env
 
+# O compose sobe o Postgres com o superuser `postgres`. Os roles da aplicação
+# são criados a partir dele.
+export SUPERUSER_URL="postgresql://postgres:postgres@localhost:5432/postgres"
+
 # Roles são infraestrutura, não schema: rodam uma vez, como superuser.
 # São TRÊS roles com poderes diferentes, e a diferença é o que protege o
 # isolamento entre empresas. Ver docs/engineering/01-multi-tenancy.md.

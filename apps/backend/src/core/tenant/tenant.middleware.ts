@@ -1,80 +1,59 @@
-import { Injectable, Logger } from "@nestjs/common";
+import { Injectable } from "@nestjs/common";
 import type { NestMiddleware } from "@nestjs/common";
 import type { NextFunction, Request, Response } from "express";
 import { isValidOrganizationId, tenantStorage } from "@nurevo/database";
+import { authStorage } from "../auth/auth-context";
+import { TokenService } from "../auth/token.service";
 
 /**
- * Populado pelo AuthGuard a partir das claims do token. Ainda não existe — é M1.
- */
-interface AuthenticatedRequest extends Request {
-  auth?: { organizationId: string; userId: string };
-}
-
-const DEV_HEADER = "x-organization-id";
-
-/**
- * Resolve o tenant da requisição e o coloca no AsyncLocalStorage, de onde
- * withTenant() o lê. Nenhum código de domínio recebe organizationId por
- * parâmetro — logo, nenhum código de domínio pode receber o errado.
+ * Resolve QUEM é o usuário e QUAL empresa está ativa, a partir do access token,
+ * e coloca ambos em AsyncLocalStorage.
  *
- * REGRA (doc 01, item 6): o tenant vem SEMPRE do token, nunca do body ou de um
- * header. Um header controlado pelo cliente é troca de tenant à vontade.
+ * Por que a verificação do token acontece aqui, e não num guard: no Nest a ordem
+ * é middleware → guard → controller. O tenant precisa estar resolvido antes de
+ * qualquer coisa abrir transação, então esperar o guard chegaria tarde demais.
+ * O AuthGuard, depois, apenas afirma a presença do que foi resolvido aqui.
  *
- * O fallback por header existe só para o M0, enquanto o Auth não está pronto, e
- * é bloqueado em produção pelo assertDevFallbackDisabled() abaixo — que roda no
- * boot, não na requisição, para o processo morrer antes de aceitar tráfego.
+ * REGRA (doc 01, item 6): o organization_id vem SEMPRE do token. Nunca do body,
+ * nunca de header. Até o M0 existia um fallback por header enquanto o Auth não
+ * estava pronto; ele foi removido junto com a chegada deste código, que era
+ * exatamente a condição combinada para removê-lo.
+ *
+ * Token ausente ou inválido não é erro aqui — rotas públicas (login, cadastro,
+ * health) precisam funcionar. Quem exige contexto é o guard.
  */
 @Injectable()
 export class TenantMiddleware implements NestMiddleware {
-  private readonly logger = new Logger(TenantMiddleware.name);
+  constructor(private readonly tokens: TokenService) {}
 
-  use(req: AuthenticatedRequest, _res: Response, next: NextFunction): void {
-    const fromToken = req.auth?.organizationId;
-    const fromHeader = devFallbackEnabled()
-      ? (req.header(DEV_HEADER) ?? undefined)
-      : undefined;
+  use(req: Request, _res: Response, next: NextFunction): void {
+    const claims = this.extractClaims(req);
 
-    const organizationId = fromToken ?? fromHeader;
-
-    // Um id malformado é entrada inválida, não erro interno: segue sem contexto
-    // e o TenantGuard devolve 401. Sem esta checagem, o valor só quebraria no
-    // cast para uuid dentro do Postgres, virando 500 e ruído de alerta.
-    if (!organizationId || !isValidOrganizationId(organizationId)) {
-      // Rotas públicas (health, login) precisam funcionar sem tenant. Quem exige
-      // tenant é o TenantGuard, e requireTenantContext() é a rede por baixo dele.
+    if (!claims) {
       next();
       return;
     }
 
-    if (!fromToken && fromHeader) {
-      this.logger.warn(
-        `Tenant resolvido pelo header ${DEV_HEADER}. Só desenvolvimento.`,
-      );
-    }
+    const organizationId =
+      claims.org && isValidOrganizationId(claims.org) ? claims.org : undefined;
 
-    tenantStorage.run({ organizationId, userId: req.auth?.userId }, next);
+    authStorage.run({ userId: claims.sub, organizationId }, () => {
+      if (!organizationId) {
+        // Autenticado, mas ainda sem empresa: estado normal entre o cadastro e o
+        // onboarding. Rotas de domínio caem no TenantGuard.
+        next();
+        return;
+      }
+
+      tenantStorage.run({ organizationId, userId: claims.sub }, next);
+    });
   }
-}
 
-function devFallbackEnabled(): boolean {
-  return (
-    process.env.NODE_ENV !== "production" &&
-    process.env.ALLOW_DEV_TENANT_HEADER === "true"
-  );
-}
+  private extractClaims(req: Request) {
+    const header = req.header("authorization");
+    if (!header?.startsWith("Bearer ")) return null;
 
-/**
- * Chamado no bootstrap. Falhar no boot é melhor que descobrir em produção que
- * qualquer um podia trocar de empresa mandando um header.
- */
-export function assertDevFallbackDisabled(): void {
-  if (
-    process.env.NODE_ENV === "production" &&
-    process.env.ALLOW_DEV_TENANT_HEADER === "true"
-  ) {
-    throw new Error(
-      `ALLOW_DEV_TENANT_HEADER=true em produção permitiria trocar de tenant por ` +
-        `header. Remova a variável. Ver docs/engineering/01-multi-tenancy.md.`,
-    );
+    const claims = this.tokens.tryVerifyAccessToken(header.slice(7));
+    return claims && isValidOrganizationId(claims.sub) ? claims : null;
   }
 }

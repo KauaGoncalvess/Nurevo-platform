@@ -94,6 +94,10 @@ model Membership {
 
   @@unique([organizationId, userId])
   @@index([organizationId, status])
+  // Exceção consciente à regra 5 do doc 01 ("todo índice começa por
+  // organization_id"): este é o índice de "minhas empresas", uma consulta que por
+  // definição acontece ANTES de haver tenant escolhido. Ele é servido pela política
+  // own_memberships, que filtra por current_user_id() em vez de organization_id.
   @@index([userId])
   @@map("memberships")
 }
@@ -117,6 +121,9 @@ model Role {
   memberships  Membership[]
   invitations  Invitation[]
 
+  // Atenção: no Postgres NULLs são distintos num índice UNIQUE, então este par
+  // NÃO garante unicidade das roles de sistema (organization_id NULL). Quem
+  // garante é o índice parcial roles_system_key_key, criado na migration do M1.
   @@unique([organizationId, key])
   @@index([organizationId])
   @@map("roles")

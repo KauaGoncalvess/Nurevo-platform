@@ -58,6 +58,7 @@ export async function forTenant<T>(
   prisma: PrismaClient,
   organizationId: string,
   fn: (tx: TenantTransaction) => Promise<T>,
+  userId?: string,
 ): Promise<T> {
   // set_config recebe texto; sem esta validação um organization_id vindo de uma
   // origem não confiável entraria como string arbitrária. O cast para uuid no
@@ -65,21 +66,75 @@ export async function forTenant<T>(
   if (!UUID_RE.test(organizationId)) {
     throw new Error(`organizationId inválido: ${organizationId}`);
   }
+  if (userId !== undefined && !UUID_RE.test(userId)) {
+    throw new Error(`userId inválido: ${userId}`);
+  }
 
   return prisma.$transaction(async (tx) => {
     await tx.$executeRaw`SELECT set_config('app.organization_id', ${organizationId}, TRUE)`;
+    if (userId !== undefined) {
+      await tx.$executeRaw`SELECT set_config('app.user_id', ${userId}, TRUE)`;
+    }
     return fn(tx);
   });
 }
 
 /**
- * Açúcar sobre forTenant() usando o tenant do AsyncLocalStorage. É o que o código
- * de domínio usa no dia a dia, para que ninguém precise passar organizationId
- * de mão em mão — e, portanto, ninguém possa passar o errado.
+ * Executa `fn` com apenas o USUÁRIO fixado, sem tenant.
+ *
+ * Serve ao caminho que existe antes de haver empresa escolhida: "quais empresas
+ * eu tenho?", logo após o login. A política own_memberships (migration do M1) é
+ * o que torna essa leitura possível sem recorrer ao client BYPASSRLS.
+ *
+ * Só enxerga o que a política permite — memberships do próprio usuário. Toda
+ * tabela de negócio continua devolvendo zero linhas aqui, porque nenhum tenant
+ * foi setado. Falha fechada, como no resto do sistema.
+ */
+export async function forUser<T>(
+  prisma: PrismaClient,
+  userId: string,
+  fn: (tx: TenantTransaction) => Promise<T>,
+): Promise<T> {
+  if (!UUID_RE.test(userId)) {
+    throw new Error(`userId inválido: ${userId}`);
+  }
+
+  return prisma.$transaction(async (tx) => {
+    await tx.$executeRaw`SELECT set_config('app.user_id', ${userId}, TRUE)`;
+    return fn(tx);
+  });
+}
+
+/**
+ * Executa `fn` com um convite específico destravado, e nada mais.
+ *
+ * Complementa a política invitation_by_token: quem apresenta o hash do token lê
+ * exatamente aquela linha de `invitations`. Toda outra tabela continua fechada,
+ * porque nenhum tenant foi setado.
+ *
+ * É o que permite aceitar convite sem recorrer ao client BYPASSRLS num fluxo que
+ * é, por natureza, exposto a quem ainda não é membro de nada.
+ */
+export async function forInvitationToken<T>(
+  prisma: PrismaClient,
+  tokenHash: string,
+  fn: (tx: TenantTransaction) => Promise<T>,
+): Promise<T> {
+  return prisma.$transaction(async (tx) => {
+    await tx.$executeRaw`SELECT set_config('app.invitation_token_hash', ${tokenHash}, TRUE)`;
+    return fn(tx);
+  });
+}
+
+/**
+ * Açúcar sobre forTenant() usando o contexto do AsyncLocalStorage. É o que o
+ * código de domínio usa no dia a dia, para que ninguém precise passar
+ * organizationId de mão em mão — e, portanto, ninguém possa passar o errado.
  */
 export function withTenant<T>(
   prisma: PrismaClient,
   fn: (tx: TenantTransaction) => Promise<T>,
 ): Promise<T> {
-  return forTenant(prisma, requireTenantContext().organizationId, fn);
+  const ctx = requireTenantContext();
+  return forTenant(prisma, ctx.organizationId, fn, ctx.userId);
 }
