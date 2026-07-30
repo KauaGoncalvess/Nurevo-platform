@@ -1,0 +1,78 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  DATABASE_URL: postgresql://nurevo_owner:owner_password@localhost:5432/nurevo?schema=public
+  DATABASE_URL_APP: postgresql://nurevo_app:app_password@localhost:5432/nurevo?schema=public
+  DATABASE_URL_ADMIN: postgresql://nurevo_admin:admin_password@localhost:5432/nurevo?schema=public
+
+jobs:
+  ci:
+    runs-on: ubuntu-latest
+
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_PASSWORD: postgres
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - run: pnpm install --frozen-lockfile
+
+      # Roles são infraestrutura e vivem fora das migrations. O que importa aqui
+      # é que o CI use exatamente os mesmos três roles de produção: se o teste
+      # rodasse como superuser, o RLS seria ignorado e a suíte inteira mentiria.
+      - name: Bootstrap de roles e banco
+        env:
+          PGPASSWORD: postgres
+        run: |
+          psql -h localhost -U postgres \
+            -v app_password=app_password \
+            -v owner_password=owner_password \
+            -v admin_password=admin_password \
+            -f packages/database/scripts/bootstrap-roles.sql
+          psql -h localhost -U postgres -c 'CREATE DATABASE nurevo OWNER nurevo_owner;'
+          psql -h localhost -U postgres -d nurevo \
+            -c 'GRANT ALL ON SCHEMA public TO nurevo_owner;'
+
+      - name: Migrations
+        run: pnpm --filter @nurevo/database exec prisma migrate deploy
+
+      - name: Build
+        run: pnpm build
+
+      - name: Fronteira de dados entre módulos (doc 02)
+        run: pnpm --filter @nurevo/database check:boundaries
+
+      - name: Lint e fronteiras de código (doc 02)
+        run: pnpm lint
+
+      - name: Typecheck
+        run: pnpm typecheck
+
+      # O portão do doc 01. Se isto ficar vermelho, nada mais importa.
+      - name: Isolamento entre tenants (doc 01)
+        run: pnpm --filter @nurevo/database test

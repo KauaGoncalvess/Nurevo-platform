@@ -1,0 +1,109 @@
+// Módulo: identity — doc 03, tabelas 1-4.
+//
+// TODAS as tabelas deste módulo são GLOBAIS: sem organization_id, sem RLS.
+// A identidade é da pessoa, não da empresa. Uma pessoa tem UMA conta e pertence
+// a N organizações via Membership. Duplicar usuário por tenant quebra login social,
+// reset de senha e a experiência de trocar de empresa.
+
+enum UserStatus {
+  active
+  blocked
+
+  @@map("user_status")
+}
+
+enum IdentityProvider {
+  google
+  apple
+  microsoft
+  github
+
+  @@map("identity_provider")
+}
+
+enum TokenPurpose {
+  verify
+  reset
+  magic_link
+
+  @@map("token_purpose")
+}
+
+model User {
+  id            String     @id @default(dbgenerated("uuid_generate_v7()")) @db.Uuid
+  email         String     @unique @db.Citext
+  emailVerifiedAt DateTime? @map("email_verified_at") @db.Timestamptz(3)
+  // nullable: conta criada por login social nunca teve senha
+  passwordHash  String?    @map("password_hash")
+  name          String
+  avatarUrl     String?    @map("avatar_url")
+  locale        String     @default("pt-BR")
+  theme         String     @default("system")
+  lastLoginAt   DateTime?  @map("last_login_at") @db.Timestamptz(3)
+  status        UserStatus @default(active)
+
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt DateTime @updatedAt @map("updated_at") @db.Timestamptz(3)
+
+  identities              UserIdentity[]
+  refreshTokens           RefreshToken[]
+  verificationTokens      EmailVerificationToken[]
+
+  @@map("users")
+}
+
+model UserIdentity {
+  id             String           @id @default(dbgenerated("uuid_generate_v7()")) @db.Uuid
+  userId         String           @map("user_id") @db.Uuid
+  provider       IdentityProvider
+  providerUserId String           @map("provider_user_id")
+  email          String?
+
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt DateTime @updatedAt @map("updated_at") @db.Timestamptz(3)
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([provider, providerUserId])
+  @@index([userId])
+  @@map("user_identities")
+}
+
+/// Rotação com detecção de reuso: todo refresh emitido herda o familyId do anterior.
+/// Se um token já revogado for apresentado, a família inteira é invalidada — é o
+/// sinal de que o token vazou. Guardamos apenas o hash, nunca o token.
+model RefreshToken {
+  id          String    @id @default(dbgenerated("uuid_generate_v7()")) @db.Uuid
+  userId      String    @map("user_id") @db.Uuid
+  tokenHash   String    @unique @map("token_hash")
+  familyId    String    @map("family_id") @db.Uuid
+  expiresAt   DateTime  @map("expires_at") @db.Timestamptz(3)
+  revokedAt   DateTime? @map("revoked_at") @db.Timestamptz(3)
+  ip          String?
+  userAgent   String?   @map("user_agent")
+  deviceLabel String?   @map("device_label")
+
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz(3)
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, revokedAt])
+  @@index([familyId])
+  @@map("refresh_tokens")
+}
+
+model EmailVerificationToken {
+  id         String       @id @default(dbgenerated("uuid_generate_v7()")) @db.Uuid
+  userId     String       @map("user_id") @db.Uuid
+  tokenHash  String       @unique @map("token_hash")
+  purpose    TokenPurpose
+  expiresAt  DateTime     @map("expires_at") @db.Timestamptz(3)
+  consumedAt DateTime?    @map("consumed_at") @db.Timestamptz(3)
+
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz(3)
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, purpose])
+  @@map("email_verification_tokens")
+}

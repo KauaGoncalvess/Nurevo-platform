@@ -1,0 +1,14 @@
+// Datasource e generator. Um arquivo .prisma por módulo — doc 02.
+//
+// O client gerado é ÚNICO (limitação do Prisma). Por isso a fronteira de dados
+// entre módulos é garantida por lint + teste (scripts/check-schema-boundaries.ts),
+// não pelo Prisma. Nenhum modelo aqui declara @relation para modelo de outro módulo.
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}

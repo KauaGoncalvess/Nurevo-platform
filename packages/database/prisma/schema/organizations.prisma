@@ -1,0 +1,174 @@
+// Módulo: organizations — doc 03, tabelas 5-11.
+//
+// Organization É o tenant: seu `id` é o `organization_id` de todo o resto.
+// Todas as tabelas aqui têm RLS (doc 01), exceto `permissions`, que é catálogo
+// global populado por seed.
+//
+// FRONTEIRA DE MÓDULO (doc 02): Membership.userId e Invitation.invitedBy apontam
+// para identity.users, que é OUTRO módulo. Por isso são uuid puro, SEM @relation.
+// A integridade é resolvida na camada de aplicação, via IdentityService. Isso é
+// deliberado: é o que permite extrair identity para fora sem reescrever o schema.
+
+enum OrganizationStatus {
+  trialing
+  active
+  past_due
+  suspended
+  canceled
+
+  @@map("organization_status")
+}
+
+enum MembershipStatus {
+  invited
+  active
+  suspended
+
+  @@map("membership_status")
+}
+
+model Organization {
+  id          String             @id @default(dbgenerated("uuid_generate_v7()")) @db.Uuid
+  slug        String             @unique
+  legalName   String             @map("legal_name")
+  tradeName   String?            @map("trade_name")
+  document    String?
+  timezone    String             @default("America/Sao_Paulo")
+  locale      String             @default("pt-BR")
+  logoUrl     String?            @map("logo_url")
+  status      OrganizationStatus @default(trialing)
+  onboardedAt DateTime?          @map("onboarded_at") @db.Timestamptz(3)
+
+  createdAt DateTime  @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt DateTime  @updatedAt @map("updated_at") @db.Timestamptz(3)
+  deletedAt DateTime? @map("deleted_at") @db.Timestamptz(3)
+
+  branches    Branch[]
+  memberships Membership[]
+  roles       Role[]
+  invitations Invitation[]
+
+  @@index([status])
+  @@map("organizations")
+}
+
+model Branch {
+  id             String  @id @default(dbgenerated("uuid_generate_v7()")) @db.Uuid
+  organizationId String  @map("organization_id") @db.Uuid
+  name           String
+  addressJson    Json?   @map("address_json")
+  phone          String?
+  timezone       String?
+  isDefault      Boolean @default(false) @map("is_default")
+
+  createdAt DateTime  @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt DateTime  @updatedAt @map("updated_at") @db.Timestamptz(3)
+  deletedAt DateTime? @map("deleted_at") @db.Timestamptz(3)
+
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+
+  // Alvo das FKs compostas de tabelas futuras (appointments etc.), doc 01 regra 3:
+  // uma FK que carrega organization_id impede referência cruzada entre tenants
+  // mesmo se a aplicação errar.
+  @@unique([organizationId, id])
+  @@index([organizationId])
+  @@map("branches")
+}
+
+model Membership {
+  id             String           @id @default(dbgenerated("uuid_generate_v7()")) @db.Uuid
+  organizationId String           @map("organization_id") @db.Uuid
+  /// -> identity.users.id (cross-module: uuid puro, sem @relation por desenho)
+  userId         String           @map("user_id") @db.Uuid
+  roleId         String           @map("role_id") @db.Uuid
+  status         MembershipStatus @default(invited)
+  /// -> identity.users.id (cross-module)
+  invitedBy      String?          @map("invited_by") @db.Uuid
+  joinedAt       DateTime?        @map("joined_at") @db.Timestamptz(3)
+
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt DateTime @updatedAt @map("updated_at") @db.Timestamptz(3)
+
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  role         Role         @relation(fields: [roleId], references: [id])
+
+  @@unique([organizationId, userId])
+  @@index([organizationId, status])
+  @@index([userId])
+  @@map("memberships")
+}
+
+/// organizationId NULL = role de sistema, visível a todos os tenants.
+/// A política de RLS libera leitura de NULL mas o WITH CHECK exige o tenant atual,
+/// então um tenant lê roles de sistema e nunca consegue criar uma.
+/// Roles customizadas por tenant são V2 — a coluna já existe para não migrar depois.
+model Role {
+  id             String  @id @default(dbgenerated("uuid_generate_v7()")) @db.Uuid
+  organizationId String? @map("organization_id") @db.Uuid
+  key            String
+  name           String
+  isSystem       Boolean @default(false) @map("is_system")
+
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt DateTime @updatedAt @map("updated_at") @db.Timestamptz(3)
+
+  organization Organization?    @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  permissions  RolePermission[]
+  memberships  Membership[]
+  invitations  Invitation[]
+
+  @@unique([organizationId, key])
+  @@index([organizationId])
+  @@map("roles")
+}
+
+/// Catálogo GLOBAL, sem organization_id e sem RLS. Convenção `recurso:ação`.
+model Permission {
+  id          String  @id @default(dbgenerated("uuid_generate_v7()")) @db.Uuid
+  key         String  @unique
+  moduleKey   String  @map("module_key")
+  description String?
+
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz(3)
+
+  roles RolePermission[]
+
+  @@index([moduleKey])
+  @@map("permissions")
+}
+
+model RolePermission {
+  roleId       String @map("role_id") @db.Uuid
+  permissionId String @map("permission_id") @db.Uuid
+  /// Espelha roles.organization_id (NULL para role de sistema). Denormalizado de
+  /// propósito: política de RLS com subquery em cada linha é caro.
+  organizationId String? @map("organization_id") @db.Uuid
+
+  role       Role       @relation(fields: [roleId], references: [id], onDelete: Cascade)
+  permission Permission @relation(fields: [permissionId], references: [id], onDelete: Cascade)
+
+  @@id([roleId, permissionId])
+  @@index([organizationId])
+  @@map("role_permissions")
+}
+
+model Invitation {
+  id             String    @id @default(dbgenerated("uuid_generate_v7()")) @db.Uuid
+  organizationId String    @map("organization_id") @db.Uuid
+  email          String    @db.Citext
+  roleId         String    @map("role_id") @db.Uuid
+  tokenHash      String    @unique @map("token_hash")
+  expiresAt      DateTime  @map("expires_at") @db.Timestamptz(3)
+  acceptedAt     DateTime? @map("accepted_at") @db.Timestamptz(3)
+  /// -> identity.users.id (cross-module)
+  invitedBy      String?   @map("invited_by") @db.Uuid
+
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt DateTime @updatedAt @map("updated_at") @db.Timestamptz(3)
+
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  role         Role         @relation(fields: [roleId], references: [id])
+
+  @@index([organizationId, email])
+  @@map("invitations")
+}

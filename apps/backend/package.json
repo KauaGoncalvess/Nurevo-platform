@@ -1,0 +1,32 @@
+{
+  "name": "@nurevo/backend",
+  "version": "0.0.0",
+  "private": true,
+  "scripts": {
+    "build": "nest build",
+    "dev": "nest start --watch",
+    "start": "node dist/main.js",
+    "lint": "eslint src",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run --passWithNoTests"
+  },
+  "dependencies": {
+    "@nestjs/common": "^11.1.6",
+    "@nestjs/core": "^11.1.6",
+    "@nestjs/platform-express": "^11.1.6",
+    "@nurevo/database": "workspace:*",
+    "reflect-metadata": "^0.2.2",
+    "rxjs": "^7.8.2"
+  },
+  "devDependencies": {
+    "@nestjs/cli": "^11.0.10",
+    "@nurevo/eslint-config": "workspace:*",
+    "@nurevo/tsconfig": "workspace:*",
+    "@types/express": "^5.0.3",
+    "@types/node": "^22.15.0",
+    "eslint": "^9.39.0",
+    "eslint-plugin-boundaries": "^5.0.1",
+    "typescript": "^5.9.2",
+    "vitest": "^3.2.4"
+  }
+}
