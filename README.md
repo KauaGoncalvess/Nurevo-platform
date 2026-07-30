@@ -19,17 +19,24 @@ Leia nesta ordem. Nenhuma linha de código de domínio deve contrariá-los.
 | [03 — Modelo de Dados V1](docs/engineering/03-data-model-v1.md) | 32 tabelas, não 150 |
 | [04 — Roadmap V1](docs/engineering/04-roadmap-v1.md) | Escopo fechado e critérios de sucesso |
 
-## Estado atual — M0 (Fundação)
+## Estado atual — M0, M1 e M2 entregues
 
-| Item | Situação |
+| Marco | Situação |
 |---|---|
-| Monorepo, CI, tooling | pronto |
-| Postgres + RLS forçado + migration inicial | pronto |
-| Identity + Organizations + RBAC (11 tabelas) | schema pronto, sem API ainda |
-| 5 testes de isolamento entre tenants | verdes, verificados por mutação |
-| Fronteiras de módulo no lint e no schema | ativas, verificadas por mutação |
-| Backend Nest com TenantMiddleware | health + rota de exemplo |
-| Auth, billing, CRM, agenda | **não começou** — M1 em diante |
+| **M0 — Fundação** | Monorepo, CI, Postgres com RLS forçado, fronteiras com enforcement |
+| **M1 — Conta** | Cadastro, login, refresh com detecção de reuso, sessões, onboarding, convites, RBAC |
+| **M2 — Dinheiro** | Planos, entitlements materializados, trial, limites que bloqueiam, webhook idempotente |
+| **M3 — Produto** | **não começou** — CRM, serviços, agenda, agendamento, arquivos |
+| **M4 — Retenção** | não começou — WhatsApp, no-show, notificações, audit |
+| `apps/web` | não começou. A API é o produto até o M3 fechar |
+
+48 testes automatizados: 13 de isolamento entre tenants e 35 de ponta a ponta.
+
+O que existe mas **não foi exercitado contra o serviço real**, por exigir
+credencial: o HTTP do Asaas (`infra/asaas.gateway.ts`) e o login com Google
+(`infra/google-provider.ts`). Nos dois casos a parte que concentra risco está
+testada — verificação do webhook e vinculação de conta por e-mail — e o que
+sobra é borda fina atrás de uma interface.
 
 ## Requisitos
 
@@ -66,24 +73,36 @@ pnpm build
 Subir o backend em desenvolvimento:
 
 ```bash
-ALLOW_DEV_TENANT_HEADER=true pnpm --filter @nurevo/backend dev
+pnpm --filter @nurevo/backend dev
 ```
+
+Fluxo completo, do cadastro ao trial:
 
 ```bash
 curl localhost:3333/health
-# {"status":"ok","database":"ok"}
+curl localhost:3333/billing/plans          # tabela de preços é pública
 
-curl localhost:3333/branches
-# 401 — rota de domínio sem empresa no contexto
+curl -XPOST localhost:3333/auth/signup -H 'content-type: application/json' \
+  -d '{"email":"eu@exemplo.com","password":"uma-senha-bem-comprida","name":"Eu"}'
 
-SEED_DEMO=true pnpm --filter @nurevo/database seed   # imprime o id do tenant demo
-curl -H "x-organization-id: <id>" localhost:3333/branches
+# Em desenvolvimento o link de verificação sai no log do servidor.
+curl -XPOST localhost:3333/auth/verify-email -H 'content-type: application/json' \
+  -d '{"token":"<token-do-log>"}'
+
+curl -XPOST localhost:3333/auth/login -H 'content-type: application/json' \
+  -d '{"email":"eu@exemplo.com","password":"uma-senha-bem-comprida"}'
+
+# Criar a empresa devolve um token novo, já com ela ativa.
+curl -XPOST localhost:3333/organizations -H "authorization: Bearer $TOKEN" \
+  -H 'content-type: application/json' -d '{"legalName":"Meu Estúdio LTDA"}'
+
+curl -XPOST localhost:3333/billing/subscribe -H "authorization: Bearer $ORG_TOKEN" \
+  -H 'content-type: application/json' -d '{"planKey":"starter"}'
 ```
 
-> `ALLOW_DEV_TENANT_HEADER` existe só enquanto o Auth não está pronto (M1). Em
-> produção o tenant vem **sempre** das claims do token. Se a variável estiver
-> ligada com `NODE_ENV=production`, o processo se recusa a subir — trocar de
-> empresa por header seria trocar de empresa à vontade.
+> O tenant vem **sempre** das claims do token — nunca de header ou body (doc 01,
+> regra 6). O `ALLOW_DEV_TENANT_HEADER` que existiu no M0 era muleta declarada
+> até o Auth ficar pronto, e foi removido junto com a chegada dele.
 
 ## Comandos
 

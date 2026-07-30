@@ -152,8 +152,154 @@ async function seedDemoTenant(): Promise<void> {
   }
 }
 
+const MODULES = [
+  ["crm", "Clientes", true],
+  ["tattoo", "Estúdio de tatuagem", false],
+] as const;
+
+const FEATURES = [
+  ["appointments.max_per_month", "limit", "agendamentos"],
+  ["files.storage_gb", "limit", "GB"],
+  ["members.max", "limit", "membros"],
+  ["whatsapp.enabled", "boolean", null],
+  ["reports.advanced", "boolean", null],
+] as const;
+
+/**
+ * Três planos (doc 04). Os limites definem o que o `usage_counters` compara —
+ * e é por eles que o M2 fica pronto: o limite tem que bloquear de verdade.
+ */
+const PLANS = [
+  {
+    key: "starter",
+    name: "Starter",
+    amount: "89.00",
+    sortOrder: 1,
+    modules: ["crm", "tattoo"],
+    features: {
+      "appointments.max_per_month": { limit: 100 },
+      "files.storage_gb": { limit: 2 },
+      "members.max": { limit: 2 },
+      "whatsapp.enabled": false,
+      "reports.advanced": false,
+    },
+  },
+  {
+    key: "pro",
+    name: "Pro",
+    amount: "189.00",
+    sortOrder: 2,
+    modules: ["crm", "tattoo"],
+    features: {
+      "appointments.max_per_month": { limit: 500 },
+      "files.storage_gb": { limit: 20 },
+      "members.max": { limit: 10 },
+      "whatsapp.enabled": true,
+      "reports.advanced": false,
+    },
+  },
+  {
+    key: "business",
+    name: "Business",
+    amount: "389.00",
+    sortOrder: 3,
+    modules: ["crm", "tattoo"],
+    features: {
+      "appointments.max_per_month": { limit: 5000 },
+      "files.storage_gb": { limit: 100 },
+      "members.max": { limit: 50 },
+      "whatsapp.enabled": true,
+      "reports.advanced": true,
+    },
+  },
+] as const;
+
+/**
+ * Catálogo de billing — global, sem RLS. Usa o client admin pelo mesmo motivo
+ * das roles de sistema: não pertence a tenant nenhum.
+ */
+async function seedBilling(): Promise<void> {
+  const admin = createAdminClient();
+
+  try {
+    for (const [key, name, isCore] of MODULES) {
+      await admin.module.upsert({
+        where: { key },
+        create: { key, name, isCore },
+        update: { name, isCore },
+      });
+    }
+
+    for (const [key, type, unit] of FEATURES) {
+      await admin.feature.upsert({
+        where: { key },
+        create: { key, type, unit },
+        update: { type, unit },
+      });
+    }
+
+    for (const plan of PLANS) {
+      const saved = await admin.plan.upsert({
+        where: { key: plan.key },
+        create: {
+          key: plan.key,
+          name: plan.name,
+          trialDays: 14,
+          sortOrder: plan.sortOrder,
+        },
+        update: { name: plan.name, sortOrder: plan.sortOrder },
+      });
+
+      await admin.planPrice.upsert({
+        where: {
+          planId_interval_currency: {
+            planId: saved.id,
+            interval: "month",
+            currency: "BRL",
+          },
+        },
+        create: {
+          planId: saved.id,
+          interval: "month",
+          amount: plan.amount,
+          currency: "BRL",
+        },
+        update: { amount: plan.amount },
+      });
+
+      const modules = await admin.module.findMany({
+        where: { key: { in: [...plan.modules] } },
+      });
+      await admin.planModule.createMany({
+        data: modules.map((m) => ({ planId: saved.id, moduleId: m.id })),
+        skipDuplicates: true,
+      });
+
+      for (const [featureKey, value] of Object.entries(plan.features)) {
+        const feature = await admin.feature.findUnique({
+          where: { key: featureKey },
+        });
+        if (!feature) continue;
+
+        await admin.planFeature.upsert({
+          where: { planId_featureId: { planId: saved.id, featureId: feature.id } },
+          create: { planId: saved.id, featureId: feature.id, value },
+          update: { value },
+        });
+      }
+    }
+
+    console.warn(
+      `Billing: ${PLANS.length} planos, ${FEATURES.length} features, ${MODULES.length} módulos.`,
+    );
+  } finally {
+    await admin.$disconnect();
+  }
+}
+
 async function main(): Promise<void> {
   await seedCatalog();
+  await seedBilling();
   if (process.env.SEED_DEMO === "true") {
     await seedDemoTenant();
   }

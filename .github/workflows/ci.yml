@@ -13,6 +13,10 @@ env:
   DATABASE_URL: postgresql://nurevo_owner:owner_password@localhost:5432/nurevo?schema=public
   DATABASE_URL_APP: postgresql://nurevo_app:app_password@localhost:5432/nurevo?schema=public
   DATABASE_URL_ADMIN: postgresql://nurevo_admin:admin_password@localhost:5432/nurevo?schema=public
+  # Segredo descartável, só do CI. O boot recusa subir em produção com o valor
+  # de exemplo do .env.example.
+  JWT_SECRET: ci-secret-descartavel-000000000000000000
+  APP_URL: http://localhost:3000
 
 jobs:
   ci:
@@ -61,6 +65,11 @@ jobs:
       - name: Migrations
         run: pnpm --filter @nurevo/database exec prisma migrate deploy
 
+      # As roles de sistema e o catálogo de planos são pré-requisito: sem eles o
+      # onboarding não encontra a role de owner e a assinatura não acha o plano.
+      - name: Seed do catálogo
+        run: pnpm --filter @nurevo/database seed
+
       - name: Build
         run: pnpm build
 
@@ -76,3 +85,6 @@ jobs:
       # O portão do doc 01. Se isto ficar vermelho, nada mais importa.
       - name: Isolamento entre tenants (doc 01)
         run: pnpm --filter @nurevo/database test
+
+      - name: Conta, cobrança e entitlements (M1 e M2)
+        run: pnpm --filter @nurevo/backend test

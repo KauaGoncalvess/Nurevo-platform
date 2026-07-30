@@ -1,0 +1,331 @@
+// Módulo: billing — doc 03, tabelas 12-24.
+//
+// É o pilar que faltava no documento de visão: o que transforma "módulo" em
+// "produto vendável". Sem entitlements, a Regra Nº 1 não monetiza.
+//
+// Catálogo é GLOBAL (sem organization_id, sem RLS): plans, plan_prices, modules,
+// features, plan_modules, plan_features, coupons. São a tabela de preços da
+// plataforma, iguais para todo mundo.
+//
+// O resto é do tenant e tem RLS: subscriptions, organization_entitlements,
+// usage_counters, invoices, payments, webhook_events.
+
+enum SubscriptionStatus {
+  trialing
+  active
+  past_due
+  canceled
+
+  @@map("subscription_status")
+}
+
+enum InvoiceStatus {
+  draft
+  open
+  paid
+  void
+  uncollectible
+
+  @@map("invoice_status")
+}
+
+enum PaymentStatus {
+  pending
+  confirmed
+  failed
+  refunded
+
+  @@map("payment_status")
+}
+
+enum PaymentMethod {
+  pix
+  card
+  boleto
+
+  @@map("payment_method")
+}
+
+enum BillingInterval {
+  month
+  year
+
+  @@map("billing_interval")
+}
+
+enum FeatureType {
+  boolean
+  limit
+
+  @@map("feature_type")
+}
+
+enum EntitlementSource {
+  plan
+  override
+  addon
+
+  @@map("entitlement_source")
+}
+
+// ---------------------------------------------------------------------------
+// Catálogo global
+// ---------------------------------------------------------------------------
+
+model Plan {
+  id          String  @id @default(dbgenerated("uuid_generate_v7()")) @db.Uuid
+  key         String  @unique
+  name        String
+  description String?
+  trialDays   Int     @default(14) @map("trial_days")
+  isPublic    Boolean @default(true) @map("is_public")
+  sortOrder   Int     @default(0) @map("sort_order")
+
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt DateTime @updatedAt @map("updated_at") @db.Timestamptz(3)
+
+  prices        PlanPrice[]
+  planModules   PlanModule[]
+  planFeatures  PlanFeature[]
+  subscriptions Subscription[]
+
+  @@map("plans")
+}
+
+model PlanPrice {
+  id       String          @id @default(dbgenerated("uuid_generate_v7()")) @db.Uuid
+  planId   String          @map("plan_id") @db.Uuid
+  interval BillingInterval
+  // numeric(12,2), nunca float: 0.1 + 0.2 em binário não é 0.3, e em dinheiro
+  // isso vira diferença de centavo em fatura.
+  amount   Decimal         @db.Decimal(12, 2)
+  currency String          @default("BRL") @db.Char(3)
+  active   Boolean         @default(true)
+
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz(3)
+
+  plan          Plan           @relation(fields: [planId], references: [id], onDelete: Cascade)
+  subscriptions Subscription[]
+
+  @@unique([planId, interval, currency])
+  @@map("plan_prices")
+}
+
+/// Catálogo de módulos vendáveis. Espelha as pastas de modules/ do doc 02 —
+/// é o que liga "pasta no código" a "linha na fatura".
+model Module {
+  id          String  @id @default(dbgenerated("uuid_generate_v7()")) @db.Uuid
+  key         String  @unique
+  name        String
+  description String?
+  isCore      Boolean @default(false) @map("is_core")
+
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz(3)
+
+  planModules PlanModule[]
+
+  @@map("modules")
+}
+
+model Feature {
+  id          String      @id @default(dbgenerated("uuid_generate_v7()")) @db.Uuid
+  key         String      @unique
+  type        FeatureType
+  unit        String?
+  description String?
+
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz(3)
+
+  planFeatures PlanFeature[]
+
+  @@map("features")
+}
+
+model PlanModule {
+  planId   String @map("plan_id") @db.Uuid
+  moduleId String @map("module_id") @db.Uuid
+
+  plan   Plan   @relation(fields: [planId], references: [id], onDelete: Cascade)
+  module Module @relation(fields: [moduleId], references: [id], onDelete: Cascade)
+
+  @@id([planId, moduleId])
+  @@map("plan_modules")
+}
+
+model PlanFeature {
+  planId    String @map("plan_id") @db.Uuid
+  featureId String @map("feature_id") @db.Uuid
+  /// jsonb: `true` para boolean, `{"limit": 500}` para limite.
+  value     Json
+
+  plan    Plan    @relation(fields: [planId], references: [id], onDelete: Cascade)
+  feature Feature @relation(fields: [featureId], references: [id], onDelete: Cascade)
+
+  @@id([planId, featureId])
+  @@map("plan_features")
+}
+
+model Coupon {
+  id             String    @id @default(dbgenerated("uuid_generate_v7()")) @db.Uuid
+  code           String    @unique
+  type           String
+  value          Decimal   @db.Decimal(12, 2)
+  duration       String
+  maxRedemptions Int?      @map("max_redemptions")
+  redeemedCount  Int       @default(0) @map("redeemed_count")
+  expiresAt      DateTime? @map("expires_at") @db.Timestamptz(3)
+
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz(3)
+
+  @@map("coupons")
+}
+
+// ---------------------------------------------------------------------------
+// Do tenant — com RLS
+// ---------------------------------------------------------------------------
+
+model Subscription {
+  id                   String             @id @default(dbgenerated("uuid_generate_v7()")) @db.Uuid
+  organizationId       String             @map("organization_id") @db.Uuid
+  planId               String             @map("plan_id") @db.Uuid
+  planPriceId          String?            @map("plan_price_id") @db.Uuid
+  status               SubscriptionStatus @default(trialing)
+  trialEndsAt          DateTime?          @map("trial_ends_at") @db.Timestamptz(3)
+  currentPeriodStart   DateTime?          @map("current_period_start") @db.Timestamptz(3)
+  currentPeriodEnd     DateTime?          @map("current_period_end") @db.Timestamptz(3)
+  cancelAtPeriodEnd    Boolean            @default(false) @map("cancel_at_period_end")
+  gateway              String?
+  gatewaySubscriptionId String?           @map("gateway_subscription_id")
+
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt DateTime @updatedAt @map("updated_at") @db.Timestamptz(3)
+
+  plan      Plan       @relation(fields: [planId], references: [id])
+  planPrice PlanPrice? @relation(fields: [planPriceId], references: [id])
+  invoices  Invoice[]
+
+  // Uma assinatura viva por empresa. O índice parcial que garante isso está na
+  // migration — o Prisma não expressa unique parcial.
+  @@unique([organizationId, id])
+  @@index([organizationId, status])
+  @@index([status, trialEndsAt])
+  @@map("subscriptions")
+}
+
+/// O que o tenant pode usar AGORA — materializado, não derivado do plano na hora.
+///
+/// Ler o plano direto pareceria mais simples e seria errado: cortesia comercial,
+/// add-on e período de carência viram exceção espalhada por todo lugar. Aqui,
+/// override é só mais uma linha com `source = 'override'`.
+model OrganizationEntitlement {
+  id             String            @id @default(dbgenerated("uuid_generate_v7()")) @db.Uuid
+  organizationId String            @map("organization_id") @db.Uuid
+  featureKey     String            @map("feature_key")
+  value          Json
+  source         EntitlementSource @default(plan)
+  expiresAt      DateTime?         @map("expires_at") @db.Timestamptz(3)
+
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt DateTime @updatedAt @map("updated_at") @db.Timestamptz(3)
+
+  @@unique([organizationId, featureKey, source])
+  @@index([organizationId])
+  @@map("organization_entitlements")
+}
+
+model UsageCounter {
+  id             String  @id @default(dbgenerated("uuid_generate_v7()")) @db.Uuid
+  organizationId String  @map("organization_id") @db.Uuid
+  featureKey     String  @map("feature_key")
+  /// `2026-07` — competência mensal.
+  period         String
+  used           Int     @default(0)
+  limitSnapshot  Int?    @map("limit_snapshot")
+
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt DateTime @updatedAt @map("updated_at") @db.Timestamptz(3)
+
+  @@unique([organizationId, featureKey, period])
+  @@index([organizationId])
+  @@map("usage_counters")
+}
+
+model Invoice {
+  id             String        @id @default(dbgenerated("uuid_generate_v7()")) @db.Uuid
+  organizationId String        @map("organization_id") @db.Uuid
+  subscriptionId String?       @map("subscription_id") @db.Uuid
+  number         String
+  status         InvoiceStatus @default(draft)
+  subtotal       Decimal       @db.Decimal(12, 2)
+  discount       Decimal       @default(0) @db.Decimal(12, 2)
+  total          Decimal       @db.Decimal(12, 2)
+  currency       String        @default("BRL") @db.Char(3)
+  dueAt          DateTime?     @map("due_at") @db.Timestamptz(3)
+  paidAt         DateTime?     @map("paid_at") @db.Timestamptz(3)
+  gatewayInvoiceId String?     @map("gateway_invoice_id")
+
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt DateTime @updatedAt @map("updated_at") @db.Timestamptz(3)
+
+  // FK COMPOSTA — regra 3 do doc 01, primeiro caso real da plataforma.
+  //
+  // Referenciar (organization_id, subscription_id) em vez de só subscription_id
+  // torna impossível uma fatura do tenant A apontar para a assinatura do tenant
+  // B, mesmo que a aplicação erre. No M0 não havia par de tabelas de negócio
+  // para ligar; aqui há.
+  subscription Subscription? @relation(fields: [organizationId, subscriptionId], references: [organizationId, id])
+  payments     Payment[]
+
+  @@unique([organizationId, id])
+  @@unique([organizationId, number])
+  @@index([organizationId, status])
+  @@map("invoices")
+}
+
+model Payment {
+  id             String        @id @default(dbgenerated("uuid_generate_v7()")) @db.Uuid
+  organizationId String        @map("organization_id") @db.Uuid
+  invoiceId      String?       @map("invoice_id") @db.Uuid
+  method         PaymentMethod
+  status         PaymentStatus @default(pending)
+  amount         Decimal       @db.Decimal(12, 2)
+  currency       String        @default("BRL") @db.Char(3)
+  gateway        String
+  gatewayPaymentId String?     @map("gateway_payment_id")
+  paidAt         DateTime?     @map("paid_at") @db.Timestamptz(3)
+  payloadJson    Json?         @map("payload_json")
+
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt DateTime @updatedAt @map("updated_at") @db.Timestamptz(3)
+
+  // FK composta, mesmo motivo da fatura.
+  invoice Invoice? @relation(fields: [organizationId, invoiceId], references: [organizationId, id])
+
+  @@index([organizationId, status])
+  @@map("payments")
+}
+
+/// Idempotência de webhook.
+///
+/// O unique em (provider, event_id) é a linha que impede cobrar duas vezes.
+/// Todo gateway reenvia evento — por timeout, por retry, por falha de rede. Sem
+/// essa constraint, o reenvio de um `payment.confirmed` credita o pagamento de novo.
+///
+/// organization_id é nullable: o evento chega antes de sabermos a que tenant
+/// pertence, e alguns eventos são da conta e não de um cliente.
+model WebhookEvent {
+  id             String    @id @default(dbgenerated("uuid_generate_v7()")) @db.Uuid
+  organizationId String?   @map("organization_id") @db.Uuid
+  provider       String
+  eventId        String    @map("event_id")
+  type           String
+  payloadJson    Json      @map("payload_json")
+  processedAt    DateTime? @map("processed_at") @db.Timestamptz(3)
+  error          String?
+
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz(3)
+
+  @@unique([provider, eventId])
+  @@index([provider, processedAt])
+  @@map("webhook_events")
+}
